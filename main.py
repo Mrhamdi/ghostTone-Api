@@ -25,7 +25,7 @@ def get_country_by_ip(ip):
             return None  # Return None if there's an error fetching the country
         return data['country']
     except Exception as e:
-        #print(f"Error fetching country for IP {ip}: {e}")
+        print(f"Error fetching country for IP {ip}: {e}")
         return None
 
 @app.websocket("/ws")
@@ -38,25 +38,29 @@ async def websocket_endpoint(websocket: WebSocket):
     # Matchmaking logic
     if waiting_users:
         matched_user = waiting_users.pop(0)  # Match with the first waiting user
+        country = get_country_by_ip(peer_info["ip"])  # Fetch country for peer's IP
+        matched_user_country = get_country_by_ip(matched_user["ip"])  # Fetch country for matched user's IP
+
+        # Send both country names to both users
         await matched_user["socket"].send_json({
             "status": "matched",
             "peer_id": peer_info["peer_id"],
-            "country": get_country_by_ip(peer_info["ip"]),  # Send the matched user's country
+            "country": country if country else "Unknown",
         })
         await websocket.send_json({
             "status": "matched",
             "peer_id": matched_user["peer_id"],
-            "country": matched_user["country"],
+            "country": matched_user_country if matched_user_country else "Unknown",
         })
     else:
         # Add this user to the waiting list
         waiting_users.append({
             "socket": websocket,
             "peer_id": peer_info["peer_id"],
-            "country": get_country_by_ip(peer_info["ip"]),  # Send the matched user's country
+            "ip": peer_info["ip"],  # Store the IP address for country lookup
         })
         await websocket.send_json({"status": "waiting"})
-
+    
     try:
         while True:
             message = await websocket.receive_text()
