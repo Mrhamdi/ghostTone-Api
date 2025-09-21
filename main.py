@@ -13,7 +13,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-waiting_users = []  
+waiting_users = []
+active_connections = {}  # Track active connections
+
 def get_country_by_ip(ip):
     url = f'http://ip-api.com/json/{ip}'
     try:
@@ -26,16 +28,46 @@ def get_country_by_ip(ip):
         print(f"Error fetching country for IP {ip}: {e}")
         return None
 
+def cleanup_user(user_socket):
+    """Remove user from waiting list and active connections"""
+    global waiting_users, active_connections
+    
+    # Remove from waiting list
+    waiting_users = [user for user in waiting_users if user["socket"] != user_socket]
+    
+    # Remove from active connections
+    if user_socket in active_connections:
+        partner_socket = active_connections[user_socket]
+        if partner_socket in active_connections:
+            del active_connections[partner_socket]
+        del active_connections[user_socket]
+        
+        # Notify partner about disconnection
+        try:
+            if partner_socket and partner_socket.client_state.name == "CONNECTED":
+                import asyncio
+                asyncio.create_task(partner_socket.send_json({
+                    "status": "partner_disconnected",
+                    "message": "Your partner has disconnected."
+                }))
+        except Exception as e:
+            print(f"Error notifying partner: {e}")
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    global waiting_users
+    global waiting_users, active_connections
     data = await websocket.receive_text()
     peer_info = json.loads(data) 
+    
     if waiting_users:
         matched_user = waiting_users.pop(0)  
         country = get_country_by_ip(peer_info["ip"])  
         matched_user_country = get_country_by_ip(matched_user["ip"])  
+
+        # Track active connection
+        active_connections[websocket] = matched_user["socket"]
+        active_connections[matched_user["socket"]] = websocket
 
         await matched_user["socket"].send_json({
             "status": "matched",
@@ -60,10 +92,8 @@ async def websocket_endpoint(websocket: WebSocket):
             message = await websocket.receive_text()
             # Handle skip action
             if message == '{"action": "skip"}':
-                for user in waiting_users:
-                    if user["socket"] == websocket:
-                        waiting_users.remove(user)
-                        break
+                cleanup_user(websocket)
+                # Notify any remaining waiting users
                 for user in waiting_users:
                     if user["socket"] != websocket:
                         await user["socket"].send_json({
@@ -72,12 +102,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
             elif message == '{"action": "cancel"}':
                 # Handle call hang-up action
-                for user in waiting_users:
-                    if user["socket"] == websocket:
-                        waiting_users.remove(user)
-                        break
+                cleanup_user(websocket)
                 await websocket.send_json({"status": "call_ended"})
     except Exception as e:
         print(f"Error: {e}")
         # Clean up when the connection closes
-        waiting_users = [user for user in waiting_users if user["socket"] != websocket]
+        cleanup_user(websocket)
